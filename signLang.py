@@ -12,18 +12,10 @@ import mediapipe as mp
 from streamlit_webrtc import webrtc_streamer, VideoTransformerBase, WebRtcMode
 
 # --- STEP 1: Safe Initialization for Modern MediaPipe ---
-try:
-    # Modern approach / Fallback for newer MediaPipe versions
-    import mediapipe.python.solutions.hands as mp_hands
-    import mediapipe.python.solutions.drawing_utils as mp_drawing
-    import mediapipe.python.solutions.drawing_styles as mp_drawing_styles
-except AttributeError:
-    # Legacy approach
-    mp_hands = mp.solutions.hands
-    mp_drawing = mp.solutions.drawing_utils
-    mp_drawing_styles = mp.solutions.drawing_styles
+mp_hands = mp.solutions.hands
+mp_drawing = mp.solutions.drawing_utils
+mp_drawing_styles = mp.solutions.drawing_styles
 
-# Load the hands tracking module safely
 hands = mp_hands.Hands(
     static_image_mode=False,
     max_num_hands=1,
