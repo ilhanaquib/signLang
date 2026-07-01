@@ -1,79 +1,187 @@
 import cv2
 import numpy as np
-import joblib
 import streamlit as st
+import mediapipe as mp
 from streamlit_webrtc import webrtc_streamer, VideoTransformerBase, WebRtcMode
 
+# --- STEP 1: Initialize MediaPipe Hands & Drawing Utilities ---
+mp_hands = mp.solutions.hands
+mp_drawing = mp.solutions.drawing_utils
+mp_drawing_styles = mp.solutions.drawing_styles
 
-# --- STEP 1: Load Your Saved Model & Dictionary ---
-@st.cache_resource
-def load_ml_assets():
-    # Loading the trained Random Forest model
-    model = joblib.load("sign_language_rf_model.pkl")
-    # Loading the label dictionary mapping {'ASL_A': 0, 'MSL_A': 1, ...}
-    label_dict = joblib.load("label_dictionary.pkl")
-    # Invert the dictionary so we can look up names by their index number
-    inv_label_dict = {v: k for k, v in label_dict.items()}
-    return model, inv_label_dict
-
-
-try:
-    rf_model, class_mapping = load_ml_assets()
-    model_loaded = True
-except Exception as e:
-    st.error(f"Error loading model files: {e}")
-    st.info(
-        "Make sure 'sign_language_rf_model.pkl' and 'label_dictionary.pkl' are in this exact folder."
-    )
-    model_loaded = False
+# Load the hands tracking module
+hands = mp_hands.Hands(
+    static_image_mode=False,  # False means it treats input as a live video stream
+    max_num_hands=1,  # Track one hand at a time
+    min_detection_confidence=0.7,  # Strict threshold to reduce false detections
+    min_tracking_confidence=0.5,
+)
 
 
-# --- STEP 2: Video Processing Engine ---
-class SignLanguageClassifier(VideoTransformerBase):
-    def __init__(self):
-        self.model = rf_model
-        self.mapping = class_mapping
+# --- STEP 2: Pure Geometric Rule Engine (No .pkl file needed!) ---
+def recognize_gesture(landmarks):
+    """
+    Decodes the hand skeleton joints using geometric logic for alphabets.
+    'landmarks' contains 21 points with normalized x, y, z coordinates.
+    """
+    # 1. Extract raw coordinates
+    wrist = landmarks[0]
 
+    # Thumb joints
+    thumb_cmc = landmarks[1]
+    thumb_mcp = landmarks[2]
+    thumb_ip = landmarks[3]
+    thumb_tip = landmarks[4]
+
+    # Finger tips
+    index_tip = landmarks[8]
+    middle_tip = landmarks[12]
+    ring_tip = landmarks[16]
+    pinky_tip = landmarks[20]
+
+    # Finger Knuckles (MCP joints)
+    index_mcp = landmarks[5]
+    middle_mcp = landmarks[9]
+    ring_mcp = landmarks[13]
+    pinky_mcp = landmarks[17]
+
+    # Finger PIP joints (middle knuckles)
+    index_pip = landmarks[6]
+    middle_pip = landmarks[10]
+    ring_pip = landmarks[14]
+    pinky_pip = landmarks[18]
+
+    # 2. Calculate Boolean States (Is the finger straight up?)
+    # Remember: y decreases as a joint moves UP the screen
+    index_up = index_tip.y < index_pip.y and index_pip.y < index_mcp.y
+    middle_up = middle_tip.y < middle_pip.y and middle_pip.y < middle_mcp.y
+    ring_up = ring_tip.y < ring_pip.y and ring_pip.y < ring_mcp.y
+    pinky_up = pinky_tip.y < pinky_pip.y and pinky_pip.y < pinky_mcp.y
+
+    # All fingers curled tightly
+    all_fist = not index_up and not middle_up and not ring_up and not pinky_up
+
+    # 3. Alphabet Decision Tree
+
+    # --- GROUP 1: All Fingers Extended ---
+    if index_up and middle_up and ring_up and pinky_up:
+        # B: Hand flat, thumb folded over palm (inside the index position horizontally)
+        if thumb_tip.x > index_mcp.x:
+            return "Letter: B"
+        return "Letter: Full Open Palm"
+
+    # --- GROUP 2: Straight Vector Extended Single/Double Fingers ---
+    # D: Index pointing straight up, others curled down in a ring with thumb
+    if index_up and not middle_up and not ring_up and not pinky_up:
+        return "Letter: D"
+
+    # F: Index and Thumb touching down, Middle, Ring, and Pinky straight up
+    if not index_up and middle_up and ring_up and pinky_up:
+        return "Letter: F"
+
+    # I: Only pinky finger extended straight up
+    if pinky_up and not index_up and not middle_up and not ring_up:
+        return "Letter: I"
+
+    # L: Index up, Thumb extended widely out to the side horizontally
+    if index_up and not middle_up and not ring_up and not pinky_up:
+        if abs(thumb_tip.x - index_mcp.x) > 0.1:
+            return "Letter: L"
+
+    # W: Index, Middle, and Ring up. Pinky curled down
+    if index_up and middle_up and ring_up and not pinky_up:
+        return "Letter: W"
+
+    # --- GROUP 3: Multiple Extended Fingers V, U, K, Y ---
+    if index_up and middle_up and not ring_up and not pinky_up:
+        # Check distance between Index and Middle tips to distinguish U and V
+        finger_spread = abs(index_tip.x - middle_tip.x)
+        # K: Thumb pointing upwards touching the middle knuckle line
+        if thumb_tip.y < middle_mcp.y:
+            return "Letter: K"
+        elif finger_spread > 0.06:
+            return "Letter: V"
+        else:
+            return "Letter: U"
+
+    # Y: Thumb and Pinky stretched completely outwards, middle three curled
+    if pinky_up and not index_up and not middle_up and not ring_up:
+        if abs(thumb_tip.x - wrist.x) > 0.12:
+            return "Letter: Y"
+
+    # --- GROUP 4: Fist / Closed Variants (A, C, E, O, S, T, M, N) ---
+    if all_fist:
+        # A: Thumb tucked straight up along the side of the index finger
+        if thumb_tip.y < index_pip.y and thumb_tip.x < index_mcp.x:
+            return "Letter: A"
+        # E: All fingertips curling down tightly, resting right on top of the thumb
+        if thumb_tip.y > ring_pip.y:
+            return "Letter: E"
+        # S: Thumb crossing straight across the middle front of the fist fingers
+        if (
+            thumb_tip.x > index_pip.x
+            and thumb_tip.x < ring_pip.x
+            and thumb_tip.y < middle_pip.y
+        ):
+            return "Letter: S"
+        # C / O: Checking for an open curved space/profile width
+        if abs(index_mcp.x - thumb_tip.x) > 0.08:
+            return "Letter: C / O"
+
+    # --- GROUP 5: Horizontal / Pointing Forwards (G, H, P, Q) ---
+    # In these signs, fingers point sideways (x changes instead of y)
+    index_pointing_sideways = abs(index_tip.x - index_mcp.x) > 0.12
+    middle_pointing_sideways = abs(middle_tip.x - middle_mcp.x) > 0.12
+
+    if index_pointing_sideways and not pinky_up and not ring_up:
+        if middle_pointing_sideways:
+            return "Letter: H"
+        else:
+            return "Letter: G"
+
+    # --- GROUP 6: Specialized Complex Sign Overlays ---
+    # Rock / Spider-Man structure used as placeholder for specific assignments
+    if index_up and pinky_up and not middle_up and not ring_up:
+        return "Special: I Love You Sign"
+
+    return "Tracking Hand (Unknown / Transitioning)"
+
+
+# --- STEP 3: Video Processing Worker ---
+class MediaPipeVideoTransformer(VideoTransformerBase):
     def transform(self, frame):
-        # 1. Convert WebRTC frame to an OpenCV BGR image
+        # Convert WebRTC frame to standard OpenCV BGR image
         img = frame.to_ndarray(format="bgr24")
-
-        # Keep a copy of the original image dimensions to draw text over later
         orig_h, orig_w = img.shape[:2]
 
-        if model_loaded:
-            try:
-                # 2. Preprocess frame to match training data specification:
-                # Resize to (64, 64) just like the dataset load loop did
-                resized_img = cv2.resize(img, (64, 64))
+        # MediaPipe requires RGB color format
+        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        results = hands.process(img_rgb)
 
-                # Flatten the image array from (64, 64, 3) to a 1D vector of 12288 elements
-                flattened_img = resized_img.reshape(1, -1)
+        display_text = "No hand detected"
 
-                # 3. Predict the class index
-                pred_idx = self.model.predict(flattened_img)[0]
+        if results.multi_hand_landmarks:
+            for hand_landmarks in results.multi_hand_landmarks:
+                # Draw the smooth skeletal lines directly onto the webcam image
+                mp_drawing.draw_landmarks(
+                    img,
+                    hand_landmarks,
+                    mp_hands.HAND_CONNECTIONS,
+                    mp_drawing_styles.get_default_hand_landmarks_style(),
+                    mp_drawing_styles.get_default_hand_connections_style(),
+                )
 
-                # 4. Extract class label name (e.g., "MSL_A" or "ASL_B")
-                label_name = self.mapping.get(pred_idx, "Unknown")
+                # Rule-base decoding of the 21 coordinate joints
+                display_text = recognize_gesture(hand_landmarks.landmark)
 
-                # Clean up the display string to look nice (e.g., "MSL: A")
-                display_text = label_name.replace("_", ": ")
-
-            except Exception as e:
-                display_text = "Processing Error"
-        else:
-            display_text = "Model Not Loaded"
-
-        # 5. Draw the prediction text beautifully on the live output video
-        # Background box for readability
-        cv2.rectangle(img, (10, orig_h - 60), (350, orig_h - 10), (0, 0, 0), -1)
-        # Prediction Text
+        # Draw UI overlay bounding bar
+        cv2.rectangle(img, (10, orig_h - 60), (450, orig_h - 10), (0, 0, 0), -1)
         cv2.putText(
             img,
             display_text,
             (20, orig_h - 25),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.9,
+            0.8,
             (0, 255, 0),
             2,
             cv2.LINE_AA,
@@ -82,30 +190,28 @@ class SignLanguageClassifier(VideoTransformerBase):
         return img
 
 
-# --- STEP 3: Streamlit Web UI Interface ---
-st.set_page_config(page_title="Sign Language Interpreter", page_icon="🤟")
+# --- STEP 4: Streamlit Interface Layout ---
+st.set_page_config(page_title="MediaPipe Sign Interpreter", page_icon="hand")
 
-st.title("🤟 Real-Time Sign Language Interpreter")
+st.title("Real-Time MediaPipe Gesture Interpreter")
 st.write(
-    "This application uses your webcam to interpret Unified ASL & MSL signs using your trained Random Forest model."
+    "This version tracks your hand's physical joints to interpret gestures instantly without relying on a static pixel model."
 )
 
-if model_loaded:
-    st.success("🤖 Random Forest model successfully loaded and ready!")
+st.info(
+    "Why this is better: It tracks the coordinates of your joints, so your room background or lighting won't mess up the prediction accuracy!"
+)
 
-    # Run WebRTC Streamer
-    webrtc_streamer(
-        key="sign-language-classifier",
-        mode=WebRtcMode.SENDRECV,
-        video_transformer_factory=SignLanguageClassifier,
-        rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
-        media_stream_constraints={"video": True, "audio": False},
-    )
-
-    st.info(
-        "💡 **Tip:** Keep your hand centered and well-lit in the camera frame to mimic the training dataset properties."
-    )
-else:
-    st.warning(
-        "Please resolve the model loading path errors above to start the application."
-    )
+# Launch WebRTC Streamer
+webrtc_streamer(
+    key="mediapipe-sign-language",
+    mode=WebRtcMode.SENDRECV,
+    video_transformer_factory=MediaPipeVideoTransformer,
+    rtc_configuration={
+        "iceServers": [
+            {"urls": ["stun:stun.l.google.com:19302"]},
+            {"urls": ["stun:stun1.l.google.com:19302"]},  # Fallback server
+        ]
+    },
+    media_stream_constraints={"video": True, "audio": False},
+)
