@@ -2,5 +2,4 @@ streamlit
 streamlit-webrtc
 opencv-python-headless
 numpy<2
-joblib
-scikit-learn
+mediapipe<=0.10.14
