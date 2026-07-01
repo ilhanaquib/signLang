@@ -5,15 +5,29 @@ import mediapipe as mp
 from streamlit_webrtc import webrtc_streamer, VideoTransformerBase, WebRtcMode
 
 # --- STEP 1: Initialize MediaPipe Hands & Drawing Utilities ---
-mp_hands = mp.solutions.hands
-mp_drawing = mp.solutions.drawing_utils
-mp_drawing_styles = mp.solutions.drawing_styles
+import cv2
+import numpy as np
+import streamlit as st
+import mediapipe as mp
+from streamlit_webrtc import webrtc_streamer, VideoTransformerBase, WebRtcMode
 
-# Load the hands tracking module
+# --- STEP 1: Safe Initialization for Modern MediaPipe ---
+try:
+    # Modern approach / Fallback for newer MediaPipe versions
+    import mediapipe.python.solutions.hands as mp_hands
+    import mediapipe.python.solutions.drawing_utils as mp_drawing
+    import mediapipe.python.solutions.drawing_styles as mp_drawing_styles
+except AttributeError:
+    # Legacy approach
+    mp_hands = mp.solutions.hands
+    mp_drawing = mp.solutions.drawing_utils
+    mp_drawing_styles = mp.solutions.drawing_styles
+
+# Load the hands tracking module safely
 hands = mp_hands.Hands(
-    static_image_mode=False,  # False means it treats input as a live video stream
-    max_num_hands=1,  # Track one hand at a time
-    min_detection_confidence=0.7,  # Strict threshold to reduce false detections
+    static_image_mode=False,
+    max_num_hands=1,
+    min_detection_confidence=0.7,
     min_tracking_confidence=0.5,
 )
 
